@@ -316,7 +316,7 @@ def load_t5xxl(
   "torch_dtype": "float16",
   "transformers_version": "4.41.2",
   "use_cache": true,
-  "vocab_size": 32128
+  "vocab_size": 69328
 }
 """
     config = json.loads(T5_CONFIG_JSON)

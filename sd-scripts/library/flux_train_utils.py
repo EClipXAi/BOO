@@ -410,19 +410,34 @@ def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
 
 
 def get_noisy_model_input_and_timesteps(
-    args, noise_scheduler, latents: torch.Tensor, noise: torch.Tensor, device, dtype
+    args, noise_scheduler, latents, noise, device, dtype
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     bsz, _, h, w = latents.shape
     sigmas = None
+    
+    # Get min and max timestep bounds (as fraction of 1000 timesteps)
+    min_t_frac = max(0, getattr(args, "min_timestep", 0)) / 999.0
+    max_t_frac = min(999, getattr(args, "max_timestep", 999)) / 999.0
+
+    # Storage for timestep visualization
+    if hasattr(args, "global_step") and args.global_step % 20 == 0:
+        # Log timestep data every 20 steps to avoid too much data
+        should_log_timesteps = True
+        sampled_timesteps = []
+    else:
+        should_log_timesteps = False
 
     if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
         # Simple random t-based noise sampling
         if args.timestep_sampling == "sigmoid":
             # https://github.com/XLabs-AI/x-flux/tree/main
-            t = torch.sigmoid(args.sigmoid_scale * torch.randn((bsz,), device=device))
+            t_raw = torch.sigmoid(args.sigmoid_scale * torch.randn((bsz,), device=device))
         else:
-            t = torch.rand((bsz,), device=device)
-
+            t_raw = torch.rand((bsz,), device=device)
+        
+        # Scale to desired range
+        t = min_t_frac + t_raw * (max_t_frac - min_t_frac)
+        
         timesteps = t * 1000.0
         t = t.view(-1, 1, 1, 1)
         noisy_model_input = (1 - t) * latents + t * noise
@@ -430,21 +445,29 @@ def get_noisy_model_input_and_timesteps(
         shift = args.discrete_flow_shift
         logits_norm = torch.randn(bsz, device=device)
         logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
-        timesteps = logits_norm.sigmoid()
-        timesteps = (timesteps * shift) / (1 + (shift - 1) * timesteps)
-
-        t = timesteps.view(-1, 1, 1, 1)
-        timesteps = timesteps * 1000.0
+        t_raw = logits_norm.sigmoid()
+        
+        # Apply shift to raw values first
+        t_raw = (t_raw * shift) / (1 + (shift - 1) * t_raw)
+        
+        # Scale to desired range
+        t = min_t_frac + t_raw * (max_t_frac - min_t_frac)
+        
+        timesteps = t * 1000.0
+        t = t.view(-1, 1, 1, 1)
         noisy_model_input = (1 - t) * latents + t * noise
     elif args.timestep_sampling == "flux_shift":
         logits_norm = torch.randn(bsz, device=device)
         logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
-        timesteps = logits_norm.sigmoid()
+        t_raw = logits_norm.sigmoid()
         mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
-        timesteps = time_shift(mu, 1.0, timesteps)
-
-        t = timesteps.view(-1, 1, 1, 1)
-        timesteps = timesteps * 1000.0
+        t_raw = time_shift(mu, 1.0, t_raw)
+        
+        # Scale to desired range
+        t = min_t_frac + t_raw * (max_t_frac - min_t_frac)
+        
+        timesteps = t * 1000.0
+        t = t.view(-1, 1, 1, 1)
         noisy_model_input = (1 - t) * latents + t * noise
     else:
         # Sample a random timestep for each image
@@ -456,12 +479,52 @@ def get_noisy_model_input_and_timesteps(
             logit_std=args.logit_std,
             mode_scale=args.mode_scale,
         )
+        
+        # Apply min/max range to the sampled values
+        u = min_t_frac + u * (max_t_frac - min_t_frac)
+        
         indices = (u * noise_scheduler.config.num_train_timesteps).long()
         timesteps = noise_scheduler.timesteps[indices].to(device=device)
 
         # Add noise according to flow matching.
         sigmas = get_sigmas(noise_scheduler, timesteps, device, n_dim=latents.ndim, dtype=dtype)
         noisy_model_input = sigmas * noise + (1.0 - sigmas) * latents
+    
+    # Collect timestep data for visualization
+    if should_log_timesteps:
+        timesteps_cpu = timesteps.detach().cpu().numpy()
+        
+        # Find wandb tracker if available
+        wandb_tracker = None
+        try:
+            from accelerate.tracking import get_available_trackers
+            for tracker in get_available_trackers():
+                if tracker.name == "wandb":
+                    wandb_tracker = tracker
+                    break
+        except:
+            pass
+            
+        if wandb_tracker:
+            import wandb
+            import numpy as np
+            
+            # Create histogram data
+            hist_values, hist_bins = np.histogram(
+                timesteps_cpu, 
+                bins=20, 
+                range=(args.min_timestep, args.max_timestep)
+            )
+            
+            # Log histogram to wandb
+            wandb_tracker.log({
+                "timestep_distribution": wandb.Histogram(
+                    np_histogram=(hist_values, hist_bins)
+                ),
+                "timestep_mean": np.mean(timesteps_cpu),
+                "timestep_min": np.min(timesteps_cpu),
+                "timestep_max": np.max(timesteps_cpu)
+            })
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
@@ -528,7 +591,7 @@ def save_flux_model_on_train_end(
     train_util.save_sd_model_on_train_end_common(args, True, True, epoch, global_step, sd_saver, None)
 
 
-# epochとstepの保存、メタデータにepoch/stepが含まれ引数が同じになるため、統合している
+# epochとstepの保存、メタデータにepoch/stepが含まれ引数が同じになるため、統合してている
 # on_epoch_end: Trueならepoch終了時、Falseならstep経過時
 def save_flux_model_on_epoch_end_or_stepwise(
     args: argparse.Namespace,

@@ -1124,8 +1124,7 @@ class NetworkTrainer:
                 # merge tag frequency:
                 for ds_dir_name, ds_freq_for_dir in dataset.tag_frequency.items():
                     # あるディレクトリが複数のdatasetで使用されている場合、一度だけ数える
-                    # もともと繰り返し回数を指定しているので、キャプション内でのタグの出現回数と、それが学習で何度使われるかは一致しない
-                    # なので、ここで複数datasetの回数を合算してもあまり意味はない
+                    # もともと繰り返し回数を指定しているので、ここで複数datasetの回数を合算してもあまり意味はない
                     if ds_dir_name in tag_frequency:
                         continue
                     tag_frequency[ds_dir_name] = ds_freq_for_dir
@@ -1874,6 +1873,12 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Max number of validation dataset items processed. By default, validation will run the entire validation dataset / 処理される検証データセット項目の最大数。デフォルトでは、検証は検証データセット全体を実行します",
+    )
+    parser.add_argument(
+        "--max_grad_value",
+        type=float,
+        default=0.0, 
+        help="clip absolute value of gradients to this value (0 = disable) / 勾配の絶対値をこの値でクリップする（0 = 無効）"
     )
     return parser
 
