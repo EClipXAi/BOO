@@ -228,9 +228,9 @@ class BasicTraining:
         """
         with gr.Row():
             # Initialize the maximum gradient norm slider
-            self.max_grad_norm = gr.Slider(
-                label="Max grad norm",
-                value=self.config.get("basic.max_grad_norm", 1.0),
+            self.max_grad_value = gr.Slider(
+                label="Max grad value",
+                value=self.config.get("basic.max_grad_value", 1.0),
                 minimum=0.0,
                 maximum=1.0,
                 interactive=True,
